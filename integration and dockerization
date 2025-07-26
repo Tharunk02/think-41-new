@@ -1,0 +1,175 @@
+1. backend/main.py (CORS enabled)
+python
+import os
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+from database import Base, engine, SessionLocal
+from models import User, Session as DBSession, Message, Product
+from schemas import MessageCreate, MessageRead, SessionRead
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+Base.metadata.create_all(bind=engine)
+app = FastAPI()
+
+# --- CORS CONFIGURATION ---
+origins = [
+    "http://localhost:3000",
+    "http://localhost"
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+def get_llm_response(prompt: str):
+    api_key = os.getenv("GROQ_API_KEY")
+    url = "https://api.groq.com/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    payload = {
+        "messages": [
+            {"role": "system", "content": "You are a helpful AI agent for an e-commerce system."},
+            {"role": "user", "content": prompt}
+        ],
+        "model": "mixtral-8x7b-32768"
+    }
+    response = requests.post(url, json=payload, headers=headers)
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"]
+
+@app.post("/api/chat", response_model=MessageRead)
+def chat(message: MessageCreate, db: Session = Depends(get_db)):
+    if message.session_id:
+        session = db.query(DBSession).filter(DBSession.id == message.session_id).first()
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+    else:
+        user = db.query(User).filter(User.username == "demo").first()
+        if not user:
+            user = User(username="demo")
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+        session = DBSession(user_id=user.id)
+        db.add(session)
+        db.commit()
+        db.refresh(session)
+
+    user_msg = Message(session_id=session.id, sender="user", message=message.message)
+    db.add(user_msg)
+    db.commit()
+    db.refresh(user_msg)
+
+    llm_reply = get_llm_response(message.message)
+    ai_msg = Message(session_id=session.id, sender="ai", message=llm_reply)
+    db.add(ai_msg)
+    db.commit()
+    db.refresh(ai_msg)
+
+    return MessageRead.from_orm(ai_msg)
+
+@app.get("/api/sessions/{user_id}", response_model=SessionRead)
+def get_sessions(user_id: int, db: Session = Depends(get_db)):
+    session = db.query(DBSession).filter(DBSession.user_id == user_id).order_by(DBSession.created_at.desc()).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return SessionRead(
+        id=session.id,
+        created_at=session.created_at,
+        messages=[MessageRead.from_orm(m) for m in session.messages]
+    )
+
+@app.get("/api/products")
+def list_products(db: Session = Depends(get_db)):
+    products = db.query(Product).all()
+    return products
+2. backend/Dockerfile
+text
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 8000
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+3. frontend/Dockerfile
+text
+FROM node:18 AS build
+WORKDIR /app
+COPY package.json ./
+RUN npm install
+COPY . .
+RUN npm run build
+
+FROM nginx:alpine
+COPY --from=build /app/build /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+4. frontend/nginx.conf (for SPA routing)
+text
+server {
+    listen 80;
+    server_name localhost;
+
+    location / {
+        root   /usr/share/nginx/html;
+        try_files $uri $uri/ /index.html;
+    }
+}
+5. docker-compose.yml (in project root)
+text
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ai_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  backend:
+    build: ./backend
+    env_file:
+      - ./backend/.env
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    volumes:
+      - ./backend:/app
+    restart: always
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: always
+
+volumes:
+  postgres_data:
