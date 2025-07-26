@@ -1,1 +1,376 @@
+Directory Structure
+text
+frontend/
+├── src/
+│   ├── components/
+│   │   ├── ChatWindow.jsx
+│   │   ├── MessageList.jsx
+│   │   ├── Message.jsx
+│   │   ├── UserInput.jsx
+│   │   └── ConversationPanel.jsx
+│   ├── context/
+│   │   └── ChatContext.jsx
+│   ├── App.jsx
+│   ├── index.js
+│   └── api.js
+├── package.json
+└── README.md
+package.json
+json
+{
+  "name": "frontend",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "axios": "^1.6.2"
+  },
+  "scripts": {
+    "start": "react-scripts start"
+  }
+}
+src/api.js
+js
+import axios from 'axios';
 
+const API_BASE = 'http://localhost:8000/api'; // Change if backend uses different port
+
+export const sendMessage = async (message, sessionId) => {
+  const payload = { message };
+  if (sessionId) payload.session_id = sessionId;
+  const res = await axios.post(`${API_BASE}/chat`, payload);
+  return res.data;
+};
+
+export const fetchSessions = async (userId) => {
+  const res = await axios.get(`${API_BASE}/sessions/${userId}`);
+  return res.data;
+};
+
+export const listProducts = async () => {
+  const res = await axios.get(`${API_BASE}/products`);
+  return res.data;
+};
+src/context/ChatContext.jsx
+jsx
+import React, { createContext, useContext, useReducer, useState } from "react";
+
+const ChatContext = createContext();
+
+const initialState = {
+  messages: [],
+  loading: false,
+  userInput: "",
+  sessionId: null,
+  conversationHistory: [], // list of sessions {id, created_at}
+  activeSessionId: null,
+  userId: 1, // For demo. Replace with authenticated user id if any.
+};
+
+function chatReducer(state, action) {
+  switch (action.type) {
+    case "SET_MESSAGES":
+      return { ...state, messages: action.messages };
+    case "ADD_MESSAGE":
+      return { ...state, messages: [...state.messages, action.message] };
+    case "SET_LOADING":
+      return { ...state, loading: action.loading };
+    case "SET_USER_INPUT":
+      return { ...state, userInput: action.input };
+    case "SET_SESSION_ID":
+      return { ...state, sessionId: action.sessionId };
+    case "SET_CONVERSATION_HISTORY":
+      return { ...state, conversationHistory: action.history };
+    case "SET_ACTIVE_SESSION":
+      return { ...state, activeSessionId: action.sessionId };
+    default:
+      return state;
+  }
+}
+
+export function ChatProvider({ children }) {
+  const [state, dispatch] = useReducer(chatReducer, initialState);
+
+  return (
+    <ChatContext.Provider value={{ state, dispatch }}>
+      {children}
+    </ChatContext.Provider>
+  );
+}
+
+export const useChat = () => useContext(ChatContext);
+src/components/Message.jsx
+jsx
+import React from "react";
+
+export default function Message({ sender, message }) {
+  const isUser = sender === "user";
+  return (
+    <div
+      style={{
+        alignSelf: isUser ? "flex-end" : "flex-start",
+        margin: "6px 0",
+        background: isUser ? "#e0f7fa" : "#eeeeee",
+        padding: "8px 16px",
+        borderRadius: "15px",
+        maxWidth: "70%",
+        color: "#222",
+        fontWeight: 500,
+      }}
+    >
+      <span>{message}</span>
+    </div>
+  );
+}
+src/components/MessageList.jsx
+jsx
+import React, { useRef, useEffect } from "react";
+import Message from "./Message";
+import { useChat } from "../context/ChatContext";
+
+export default function MessageList() {
+  const { state } = useChat();
+  const messagesEndRef = useRef();
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [state.messages]);
+
+  return (
+    <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+      {state.messages?.map((m, i) => (
+        <Message key={i} sender={m.sender} message={m.message} />
+      ))}
+      <div ref={messagesEndRef} />
+    </div>
+  );
+}
+src/components/UserInput.jsx
+jsx
+import React from "react";
+import { useChat } from "../context/ChatContext";
+
+export default function UserInput({ onSend }) {
+  const { state, dispatch } = useChat();
+
+  const handleChange = (e) => {
+    dispatch({ type: "SET_USER_INPUT", input: e.target.value });
+  };
+
+  const handleSend = (e) => {
+    e.preventDefault();
+    if (state.userInput.trim()) {
+      onSend(state.userInput.trim());
+    }
+  };
+
+  return (
+    <form
+      onSubmit={handleSend}
+      style={{ display: "flex", padding: 8, borderTop: "1px solid #ddd" }}
+    >
+      <input
+        type="text"
+        value={state.userInput}
+        onChange={handleChange}
+        placeholder="Type your message..."
+        style={{
+          flex: 1,
+          padding: 12,
+          border: "none",
+          outline: "none",
+          fontSize: 16,
+        }}
+      />
+      <button
+        type="submit"
+        disabled={state.loading}
+        style={{
+          marginLeft: 8,
+          padding: "0 22px",
+          borderRadius: 6,
+          border: "none",
+          background: "#09a7ee",
+          color: "#fff",
+          fontWeight: 600,
+          cursor: state.loading ? "not-allowed" : "pointer",
+        }}
+      >
+        Send
+      </button>
+    </form>
+  );
+}
+src/components/ConversationPanel.jsx
+jsx
+import React, { useEffect } from "react";
+import { useChat } from "../context/ChatContext";
+import axios from "axios";
+
+const API_BASE = "http://localhost:8000/api"; // adjust if needed
+
+export default function ConversationPanel({ onSelect }) {
+  const { state, dispatch } = useChat();
+
+  useEffect(() => {
+    async function fetchHistory() {
+      // Fake: fetch recent sessions (here, latest session only, you can extend)
+      try {
+        // Adjust: The /sessions/{user_id} returns the last session with message list.
+        // To list all sessions: you should update backend to /sessions/{user_id}/all if needed.
+        const res = await axios.get(`${API_BASE}/sessions/${state.userId}`);
+        dispatch({
+          type: "SET_CONVERSATION_HISTORY",
+          history: [
+            {
+              id: res.data.id,
+              created_at: res.data.created_at,
+              messagesCount: res.data.messages.length,
+            },
+          ],
+        });
+      } catch (e) {
+        // Ignore if none found yet
+      }
+    }
+    fetchHistory();
+  }, [dispatch, state.userId]);
+
+  return (
+    <div
+      style={{
+        width: 240,
+        background: "#f3f3f3",
+        padding: 12,
+        borderRight: "1px solid #ddd",
+        height: "100%",
+        overflowY: "auto",
+      }}
+    >
+      <h4 style={{ margin: "10px 0 18px 0" }}>Past Conversations</h4>
+      {state.conversationHistory.length === 0 && (
+        <div style={{ color: "#888" }}>No previous history</div>
+      )}
+      {state.conversationHistory.map((conv) => (
+        <div
+          key={conv.id}
+          onClick={() => onSelect(conv.id)}
+          style={{
+            padding: 10,
+            marginBottom: 12,
+            borderRadius: 6,
+            background:
+              state.activeSessionId === conv.id ? "#b3e5fc" : "#e0e0e0",
+            cursor: "pointer",
+          }}
+        >
+          <div style={{ fontWeight: 600 }}>
+            Conversation #{conv.id}
+          </div>
+          <div style={{ fontSize: 12, color: "#444" }}>
+            Messages: {conv.messagesCount || 0}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+src/components/ChatWindow.jsx
+jsx
+import React from "react";
+import { useChat } from "../context/ChatContext";
+import MessageList from "./MessageList";
+import UserInput from "./UserInput";
+import ConversationPanel from "./ConversationPanel";
+import { sendMessage, fetchSessions } from "../api";
+
+export default function ChatWindow() {
+  const { state, dispatch } = useChat();
+
+  // Sends user message, receives AI, updates state & session
+  const handleSend = async (text) => {
+    dispatch({ type: "SET_LOADING", loading: true });
+    try {
+      // If no session, backend will create it and return id in message
+      const resp = await sendMessage(text, state.sessionId);
+      // Add user message
+      dispatch({
+        type: "ADD_MESSAGE",
+        message: {
+          sender: "user",
+          message: text,
+        },
+      });
+      // Add AI message (response)
+      dispatch({
+        type: "ADD_MESSAGE",
+        message: {
+          sender: "ai",
+          message: resp.message,
+        },
+      });
+      // Set sessionId if it's the first message/session
+      if (!state.sessionId && resp) {
+        // Ideally, backend should return session id -- adapt API if needed
+        // For now, reload messages from backend for this session
+        // Optionally, you can call fetchSessions(state.userId) to refresh history
+      }
+      dispatch({ type: "SET_USER_INPUT", input: "" });
+    } catch (err) {
+      alert("Failed to send message.");
+    }
+    dispatch({ type: "SET_LOADING", loading: false });
+  };
+
+  // Loads history for a certain session
+  const handleSessionSelect = async (sessionId) => {
+    dispatch({ type: "SET_LOADING", loading: true });
+    dispatch({ type: "SET_ACTIVE_SESSION", sessionId });
+    try {
+      const data = await fetchSessions(state.userId); // returns last session, or change to by id
+      // You may want to adapt API to /sessions/{user_id}/{session_id}
+      const msgs = data?.messages || [];
+      dispatch({ type: "SET_MESSAGES", messages: msgs });
+    } catch (err) {
+      alert("Couldn't load session history.");
+    }
+    dispatch({ type: "SET_LOADING", loading: false });
+  };
+
+  return (
+    <div style={{ display: "flex", height: "92vh", maxWidth: 1100, margin: "32px auto 0 auto", borderRadius: 10, boxShadow: "0 0 16px #e0e0e0"}}>
+      <ConversationPanel onSelect={handleSessionSelect} />
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "#fafcff" }}>
+        <div style={{ padding: "20px 0 12px 0", textAlign: "center", background: "#f9f9f9", borderBottom: "1px solid #eee" }}>
+          <b>AI Chat Agent</b>
+        </div>
+        <MessageList />
+        <UserInput onSend={handleSend} />
+      </div>
+    </div>
+  );
+}
+src/App.jsx
+jsx
+import React from "react";
+import { ChatProvider } from "./context/ChatContext";
+import ChatWindow from "./components/ChatWindow";
+
+function App() {
+  return (
+    <ChatProvider>
+      <ChatWindow />
+    </ChatProvider>
+  );
+}
+
+export default App;
+src/index.js
+jsx
+import React from "react";
+import { createRoot } from "react-dom/client";
+import App from "./App";
+
+const root = createRoot(document.getElementById("root"));
+root.render(<App />);
