@@ -1,1 +1,226 @@
+text
+backend/
+├── main.py
+├── models.py
+├── schemas.py
+├── database.py
+├── load_data.py
+├── requirements.txt
+└── .env
+requirements.txt
+text
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+python-dotenv
+pydantic
+requests
+pandas
+.env (Add your PostgreSQL DB and Groq API Key)
+text
+DATABASE_URL=postgresql://username:password@localhost:5432/your_db
+GROQ_API_KEY=your_groq_api_key
+database.py
+python
+import os
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, declarative_base
+from dotenv import load_dotenv
 
+load_dotenv()
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:password@localhost:5432/ai_db")
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+models.py
+python
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
+from sqlalchemy.orm import relationship
+from datetime import datetime
+from database import Base
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, index=True)
+    sessions = relationship("Session", back_populates="user")
+
+class Session(Base):
+    __tablename__ = "sessions"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    user = relationship("User", back_populates="sessions")
+    messages = relationship("Message", back_populates="session")
+
+class Message(Base):
+    __tablename__ = "messages"
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(Integer, ForeignKey("sessions.id"))
+    sender = Column(String)  # 'user' or 'ai'
+    message = Column(Text)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    session = relationship("Session", back_populates="messages")
+
+# Example: E-commerce Product (for CSV import)
+class Product(Base):
+    __tablename__ = "products"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String)
+    price = Column(String)
+    category = Column(String)
+    description = Column(Text)
+schemas.py
+python
+from pydantic import BaseModel
+from typing import Optional, List
+from datetime import datetime
+
+class MessageBase(BaseModel):
+    message: str
+
+class MessageCreate(MessageBase):
+    session_id: Optional[int] = None
+
+class MessageRead(BaseModel):
+    id: int
+    sender: str
+    message: str
+    timestamp: datetime
+
+    class Config:
+        orm_mode = True
+
+class SessionRead(BaseModel):
+    id: int
+    created_at: datetime
+    messages: List[MessageRead]
+
+    class Config:
+        orm_mode = True
+
+class UserRead(BaseModel):
+    id: int
+    username: str
+
+    class Config:
+        orm_mode = True
+load_data.py (CSV data ingestion for products)
+python
+import pandas as pd
+from sqlalchemy.orm import Session
+from database import SessionLocal, engine, Base
+from models import Product
+
+def ingest_products(csv_path):
+    Base.metadata.create_all(bind=engine)
+    df = pd.read_csv(csv_path)
+    db: Session = SessionLocal()
+    for _, row in df.iterrows():
+        product = Product(
+            name=row.get("name"),
+            price=row.get("price"),
+            category=row.get("category"),
+            description=row.get("description", "")
+        )
+        db.add(product)
+    db.commit()
+    db.close()
+
+if __name__ == "__main__":
+    csv_file = "data/products.csv"  # Adjust path
+    ingest_products(csv_file)
+main.py
+python
+import os
+from fastapi import FastAPI, Depends, HTTPException, Request
+from sqlalchemy.orm import Session
+from typing import Optional
+from database import Base, engine, SessionLocal
+from models import User, Session as DBSession, Message, Product
+from schemas import MessageCreate, MessageRead, SessionRead
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+Base.metadata.create_all(bind=engine)
+app = FastAPI()
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# --- Utility Functions ---
+def get_llm_response(prompt: str):
+    api_key = os.getenv("GROQ_API_KEY")
+    url = "https://api.groq.com/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    payload = {
+        "messages": [
+            {"role": "system", "content": "You are a helpful AI agent for an e-commerce system."},
+            {"role": "user", "content": prompt}
+        ],
+        "model": "mixtral-8x7b-32768"  # or other model provided by Groq
+    }
+    response = requests.post(url, json=payload, headers=headers)
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"]
+
+# --- Endpoints ---
+@app.post("/api/chat", response_model=MessageRead)
+def chat(message: MessageCreate, db: Session = Depends(get_db)):
+    session = None
+    # If session ID specified, use it. Otherwise, create new session/user (demo purpose).
+    if message.session_id:
+        session = db.query(DBSession).filter(DBSession.id == message.session_id).first()
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+    else:
+        # For demo, auto-create user/session (replace for real auth)
+        user = db.query(User).filter(User.username == "demo").first()
+        if not user:
+            user = User(username="demo")
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+        session = DBSession(user_id=user.id)
+        db.add(session)
+        db.commit()
+        db.refresh(session)
+
+    # Save user's message
+    user_msg = Message(session_id=session.id, sender="user", message=message.message)
+    db.add(user_msg)
+    db.commit()
+    db.refresh(user_msg)
+
+    # LLM response
+    llm_reply = get_llm_response(message.message)
+    ai_msg = Message(session_id=session.id, sender="ai", message=llm_reply)
+    db.add(ai_msg)
+    db.commit()
+    db.refresh(ai_msg)
+
+    return MessageRead.from_orm(ai_msg)
+
+@app.get("/api/sessions/{user_id}", response_model=SessionRead)
+def get_sessions(user_id: int, db: Session = Depends(get_db)):
+    session = db.query(DBSession).filter(DBSession.user_id == user_id).order_by(DBSession.created_at.desc()).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return SessionRead(
+        id=session.id,
+        created_at=session.created_at,
+        messages=[MessageRead.from_orm(m) for m in session.messages]
+    )
+
+# (Optional) Product search endpoint
+@app.get("/api/products")
+def list_products(db: Session = Depends(get_db)):
+    products = db.query(Product).all()
+    return products
